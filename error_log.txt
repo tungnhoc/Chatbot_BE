@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "D:\Chatbot1\chatbot\src\config\database.py", line 25, in get_database_engine
+    print("K\u1ebft n\u1ed1i MySQL Railway thành công")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u1ebf' in position 1: character maps to <undefined>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import src.app
+  File "D:\Chatbot1\chatbot\src\app.py", line 10, in <module>
+    from src.routes.upload_routes import upload_bp
+  File "D:\Chatbot1\chatbot\src\routes\upload_routes.py", line 11, in <module>
+    from src.config.db_session import SessionLocal
+  File "D:\Chatbot1\chatbot\src\config\db_session.py", line 4, in <module>
+    engine = get_database_engine()
+  File "D:\Chatbot1\chatbot\src\config\database.py", line 29, in get_database_engine
+    print(f"\u274c L\u1ed7i k\u1ebft n\u1ed1i MySQL: {e}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u274c' in position 0: character maps to <undefined>

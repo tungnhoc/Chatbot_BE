@@ -1,0 +1,32 @@
+# ======================
+# Python
+# ======================
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ======================
+# Virtual environment
+# ======================
+venv/
+.env
+
+# ======================
+# Local / Generated folders
+# ======================
+archive/
+Demo-SecurePass/
+SecurePass-ML/
+
+# ======================
+# OS / IDE
+# ======================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ======================
+# Logs / cache
+# ======================
+*.log
