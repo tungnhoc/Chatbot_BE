@@ -2,35 +2,30 @@ from datetime import timedelta
 from flask_jwt_extended import (
     create_access_token, create_refresh_token
 )
+from werkzeug.security import generate_password_hash, check_password_hash
 from src.models.Users import User
 from flask_jwt_extended import decode_token
-from src.utils.predict_password import predict_password_strength
 
 def register_service(session, data):
     try:
         email = data.email
         password = data.password
-        # strength = predict_password_strength(password)
+        username = data.username if data.username else email
 
-        # if strength == "WEAK":
-        #     return {
-        #         "error": "Password too weak. Please enter a stronger password."
-        #     }, 400
-        
-        
         if not email or not password:
             return {"error": "Missing email or password"}, 400
- 
+
         if User.get_by_emails(session, email):
-            return {"error": "Email already exists"}, 409 
+            return {"error": "Email already exists"}, 409
+
         new_user = User(
-            UserName=email,
+            UserName=username,
             Email=email,
             Role="user"
         )
         new_user.set_password(password)
         new_user.save(session)
-        
+
         return {"message": "User registered successfully"}, 201
 
     except Exception as e:
@@ -39,12 +34,21 @@ def register_service(session, data):
 
 def login_service(session, data):
     try:
-        email = data.email
         password = data.password
+        email = getattr(data, "email", None)
+        username = getattr(data, "username", None)
 
-        user = User.get_by_emails(session, email)
+        if not email and not username:
+            return {"error": "Missing username or email"}
+
+        user = None
+        if email:
+            user = User.get_by_emails(session, email)
+        if not user and username:
+            user = session.query(User).filter_by(UserName=username).first()
+
         if not user or not user.check_password(password):
-            return {"error": "Invalid email or password"}
+            return {"error": "Invalid credentials"}
 
         refresh_token = create_refresh_token(identity=str(user.UserID))
         jti_refresh = decode_token(refresh_token)["jti"]
@@ -58,7 +62,7 @@ def login_service(session, data):
         access_token = create_access_token(
             identity=str(user.UserID),
             additional_claims=additional_claims,
-            expires_delta=timedelta(minutes=10)
+            expires_delta=timedelta(hours=1)
         )
 
         return {
@@ -75,4 +79,3 @@ def login_service(session, data):
     except Exception as e:
         session.rollback()
         return {"error": str(e)}
-
