@@ -64,9 +64,10 @@ def build_answer_prompt(user_query, retrieved_context, conversation_summary=None
             INSTRUCTIONS:
             - Analyze all sources carefully (summary, chat, and documents).
             - Answer directly in the SAME LANGUAGE as the question.
-            - Quote exact data from the documents when possible.
-            - If the documents don’t contain the answer, say so clearly.
-            - Be professional and concise.
+            - Prioritize information from reference documents when available.
+            - If reference documents do not contain sufficient details, answer accurately using your general knowledge and clearly inform the user.
+            - Be professional, polite, and clear.
+
 
             ANSWER:
             """

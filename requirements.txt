@@ -16,3 +16,4 @@ email-validator
 pydantic
 gradio_client
 flask-cors
+pdfplumber

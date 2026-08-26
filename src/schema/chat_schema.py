@@ -11,3 +11,4 @@ class ChatRequestSchema(BaseModel):
 class ChatResponseSchema(BaseModel):
     conversation_id: int
     response: str
+    title: Optional[str] = None

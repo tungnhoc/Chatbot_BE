@@ -290,7 +290,8 @@ def chat():
         )
         response_schema = ChatResponseSchema(
             conversation_id=result["conversation_id"],
-            response=result["response"]
+            response=result["response"],
+            title=result.get("title")
         )
         return jsonify(response_schema.model_dump()), 200
     except Exception as e:

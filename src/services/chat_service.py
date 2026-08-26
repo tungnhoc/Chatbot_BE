@@ -20,96 +20,102 @@ def save_message_to_redis_and_db(
     text_message: str, 
     is_summary: bool = False
 ) -> Dict:
-    client = get_redis_client()  
-    redis_key = get_redis_key(user_id, conv_id)
-    
-    message = {
-        'role': role,
-        'text': text_message,
-        'timestamp': datetime.now().isoformat()
-    }
-    client.rpush(redis_key, json.dumps(message))
-    current_len = client.llen(redis_key)
-    client.expire(redis_key, 40)
+    try:
+        client = get_redis_client()  
+        redis_key = get_redis_key(user_id, conv_id)
+        
+        message = {
+            'role': role,
+            'text': text_message,
+            'timestamp': datetime.now().isoformat()
+        }
+        client.rpush(redis_key, json.dumps(message))
+        current_len = client.llen(redis_key)
+        client.expire(redis_key, 40)
 
-    print(f"Current messages in Redis for conv {conv_id}: {current_len}")
-    
-    summarized = False
-    
-    if current_len >= MAX_MESSAGES_IN_REDIS and not is_summary:
+        print(f"Current messages in Redis for conv {conv_id}: {current_len}")
+        
+        summarized = False
+        
+        if current_len >= MAX_MESSAGES_IN_REDIS and not is_summary:
 
-        all_msgs_json = client.lrange(redis_key, -MAX_MESSAGES_IN_REDIS, -1)
-        all_msgs = [json.loads(m) for m in all_msgs_json]
-
-
-        msgs_to_save = all_msgs[:-KEEP_LAST_MESSAGES]  
-        msgs_for_summary = all_msgs  
-
-        history_str = "\n".join([f"{m['role']}: {m['text']}" for m in msgs_for_summary])
-        summary_text = summarize_conversation(history_str)  
-
-        batch_insert = text("""
-            INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
-            VALUES (:conv_id, :role, :text, :timestamp)
-        """)
-
-        try:
-            for msg in msgs_to_save:
-                session.execute(batch_insert, {
-                    'conv_id': conv_id,
-                    'role': msg['role'],
-                    'text': msg['text'],
-                    'timestamp': datetime.fromisoformat(msg['timestamp'])
-                })
-            session.commit()
+            all_msgs_json = client.lrange(redis_key, -MAX_MESSAGES_IN_REDIS, -1)
+            all_msgs = [json.loads(m) for m in all_msgs_json]
 
 
-            insert_summary = text("""
-                INSERT INTO VectorMemorySummary (ConversationID, SummaryText, CreatedAt)
+            msgs_to_save = all_msgs[:-KEEP_LAST_MESSAGES]  
+            msgs_for_summary = all_msgs  
 
-                VALUES (:conv_id, :summary_text, NOW())
+            history_str = "\n".join([f"{m['role']}: {m['text']}" for m in msgs_for_summary])
+            summary_text = summarize_conversation(history_str)  
+
+            batch_insert = text("""
+                INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
+                VALUES (:conv_id, :role, :text, :timestamp)
             """)
-            result_summary = session.execute(insert_summary, {
-                'conv_id': conv_id, 
-                'summary_text': summary_text
-            })
-            summary_id = result_summary.lastrowid
-            session.commit()
 
-            if not summary_id:
-                raise ValueError("Failed to create memory summary.")
-            
-            upsert_summary(summary_text=summary_text,summary_id=summary_id,user_id=user_id, conv_id=conv_id)
+            try:
+                for msg in msgs_to_save:
+                    session.execute(batch_insert, {
+                        'conv_id': conv_id,
+                        'role': msg['role'],
+                        'text': msg['text'],
+                        'timestamp': datetime.fromisoformat(msg['timestamp'])
+                    })
+                session.commit()
 
-            client.ltrim(redis_key, -KEEP_LAST_MESSAGES, -1)
-            summarized = True
-            print(f"Redis trimmed to {KEEP_LAST_MESSAGES} recent messages for conv {conv_id}")
 
-        except Exception as e:
-            session.rollback()
-            print("Error saving messages or summary:", e)
-        finally:
-            session.close()
+                insert_summary = text("""
+                    INSERT INTO VectorMemorySummary (ConversationID, SummaryText, CreatedAt)
 
-    return {
-        "success": True,
-        "message_count": current_len,
-        "summarized": summarized
-    }
+                    VALUES (:conv_id, :summary_text, NOW())
+                """)
+                result_summary = session.execute(insert_summary, {
+                    'conv_id': conv_id, 
+                    'summary_text': summary_text
+                })
+                summary_id = result_summary.lastrowid
+                session.commit()
+
+                if not summary_id:
+                    raise ValueError("Failed to create memory summary.")
+                
+                upsert_summary(summary_text=summary_text,summary_id=summary_id,user_id=user_id, conv_id=conv_id)
+
+                client.ltrim(redis_key, -KEEP_LAST_MESSAGES, -1)
+                summarized = True
+                print(f"Redis trimmed to {KEEP_LAST_MESSAGES} recent messages for conv {conv_id}")
+
+            except Exception as e:
+                session.rollback()
+                print("Error saving messages or summary:", e)
+
+        return {
+            "success": True,
+            "message_count": current_len,
+            "summarized": summarized
+        }
+    except Exception as redis_err:
+        print(f"⚠️ Redis không khả dụng ({redis_err}), chuyển sang lưu trực tiếp vào MySQL.")
+        try:
+            save_message(session, conv_id, role, text_message)
+        except Exception as db_err:
+            print(f"❌ Lỗi lưu tin nhắn vào MySQL: {db_err}")
+        return {"success": True, "fallback": True}
 
 
 def finalize_conversation(session, user_id: str, conv_id: int):
-    client = get_redis_client()
-
-    redis_key = get_redis_key(user_id, conv_id)
-
-    remaining_json = client.lrange(redis_key, 0, -1)
-    remaining_msgs = [json.loads(x) for x in remaining_json]
-
-    history_str = "\n".join([f"{m['role']}: {m['text']}" for m in remaining_msgs])
-    summary_text = summarize_conversation(history_str)
-
     try:
+        client = get_redis_client()
+
+        redis_key = get_redis_key(user_id, conv_id)
+
+        remaining_json = client.lrange(redis_key, 0, -1)
+        remaining_msgs = [json.loads(x) for x in remaining_json]
+
+        history_str = "\n".join([f"{m['role']}: {m['text']}" for m in remaining_msgs])
+        summary_text = summarize_conversation(history_str)
+
         batch_insert = text("""
             INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
             VALUES (:conv_id, :role, :text, :timestamp)
@@ -152,6 +158,7 @@ def finalize_conversation(session, user_id: str, conv_id: int):
 
 
 def get_last_messages_from_redis(user_id: str, conv_id: int, count:int = 5)->List[Dict]:
+    try:
         client = get_redis_client()
         redis_key = get_redis_key(user_id, conv_id)
         last_msgs_jsonn = client.lrange(redis_key, -count, -1)
@@ -161,6 +168,9 @@ def get_last_messages_from_redis(user_id: str, conv_id: int, count:int = 5)->Lis
         last_messages  = [json.loads(msg) for msg in last_msgs_jsonn]
         print(f"Lấy {len(last_messages )} tin cuối của conv {conv_id} từ Redis")
         return last_messages
+    except Exception as e:
+        print(f"⚠️ Không thể lấy tin nhắn từ Redis ({e}), trả về danh sách rỗng.")
+        return []
 
 
 
@@ -230,12 +240,12 @@ def load_conversation_history(session, conversation_id: str, limit: int = 20, of
 
 
 
-def save_message(session, conversation_id: int, role: str, text: str):
+def save_message(session, conversation_id: int, role: str, text_content: str):
     insert_msg = text("""
         INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
         VALUES (:conv_id, :role, :text, NOW())
     """)
-    session.execute(insert_msg, {'conv_id': conversation_id, 'role': role, 'text': text})
+    session.execute(insert_msg, {'conv_id': conversation_id, 'role': role, 'text': text_content})
     session.commit()
 
 
@@ -301,12 +311,62 @@ def join_message_texts(messages: List[Dict]) -> str | None:
     return "\n".join([m.get("text", "") for m in messages])
 
 
+def is_generic_title(title_str: str) -> bool:
+    if not title_str or not title_str.strip():
+        return True
+    lower = title_str.strip().lower()
+    return lower in [
+        "cuộc trò chuyện mới",
+        "đoạn chat mới",
+        "trò chuyện mới",
+        "new chat",
+        "new conversation",
+        "chat",
+        "untitled",
+    ]
+
+
+def generate_title_from_query(query_text: str) -> str:
+    try:
+        from src.llm.llm_client import generate_groq_response
+        prompt = (
+            f"Tạo một tiêu đề ngắn gọn (từ 3 đến 6 từ) phản ánh nội dung chính của câu hỏi sau: '{query_text}'. "
+            f"Chỉ trả về tiêu đề (bằng cùng ngôn ngữ với câu hỏi), tuyệt đối không dùng dấu ngoặc kép hay câu dẫn nào khác."
+        )
+        title = generate_groq_response(prompt).strip().strip('"\'')
+        if len(title) > 50:
+            title = title[:47] + "..."
+        return title if title else query_text[:35]
+    except Exception as e:
+        print("Lỗi tạo tiêu đề tự động bằng LLM:", e)
+        clean = query_text.strip().replace("\n", " ")
+        return clean[:35] + ("..." if len(clean) > 35 else "")
+
+
 def handle_chat_query(session, user_id: str, query_text: str, conversation_id: int = None, document_ids: List[int] = None, title: str = 'New Chat') -> Dict:
     
     if not conversation_id:
         conversation_id = create_new_conversation(session, user_id, title)
     else:
         print(f"Sử dụng ConversationID có sẵn: {conversation_id}")
+
+    # Kiểm tra và tự động tóm tắt tạo tiêu đề nếu đang dùng tên mặc định
+    check_title_query = text("SELECT Title FROM Conversations WHERE ConversationID = :conv_id")
+    conv_row = session.execute(check_title_query, {"conv_id": conversation_id}).fetchone()
+    current_db_title = conv_row[0] if conv_row else title
+
+    new_generated_title = None
+    if is_generic_title(current_db_title):
+        new_generated_title = generate_title_from_query(query_text)
+        if new_generated_title:
+            try:
+                update_title_query = text("UPDATE Conversations SET Title = :new_title, UpdatedAt = NOW() WHERE ConversationID = :conv_id")
+                session.execute(update_title_query, {"new_title": new_generated_title, "conv_id": conversation_id})
+                session.commit()
+                current_db_title = new_generated_title
+            except Exception as e:
+                session.rollback()
+                print("❌ Lỗi cập nhật tiêu đề DB:", e)
     
     context = []
 
@@ -372,9 +432,7 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
             user_query=query_text,
             retrieved_context = "\n".join(context) if context else None,
             conversation_summary="\n".join(get_summary) if get_summary else None,
-            # conversation_summary=None,
             messages_recently="\n".join(messages_recently ) if messages_recently  else None
-            # messages_recently= None
         )
         print("LLM trả về phản hồi thành công.")
     except Exception as e:
@@ -402,9 +460,11 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
         print("Tin nhắn đã được lưu.")
     except Exception as e:
         print(f"Lỗi khi lưu message: {e}")
+
     return {
         "response": llm_response,
-        "conversation_id": conversation_id
+        "conversation_id": conversation_id,
+        "title": current_db_title
     }    
 
 

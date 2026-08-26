@@ -8,11 +8,12 @@ CHECK_INTERVAL = 5
 
 
 def redis_expire_watcher():
-    client = get_redis_client()
     print("Redis TTL watcher started...")
+    logged_error = False
 
     while True:
         try:
+            client = get_redis_client()
             keys = client.keys("user:*:conv:*:messages")
 
             for key in keys:
@@ -46,8 +47,13 @@ def redis_expire_watcher():
 
                     client.delete(key)
 
+            logged_error = False
         except Exception as e:
-            print("TTL watcher error:", e)
+            if not logged_error:
+                print("⚠️ Upstash Redis API đã hết hạn hoặc không thể kết nối. Hệ thống tự động chuyển sang dùng MySQL trực tiếp.")
+                logged_error = True
+            time.sleep(30)
+            continue
 
         time.sleep(CHECK_INTERVAL)
 

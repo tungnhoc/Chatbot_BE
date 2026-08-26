@@ -5,6 +5,17 @@ load_dotenv()
 import time
 
 
+import re
+
+def clean_llm_response(text: str) -> str:
+    if not text:
+        return ""
+    # Remove completed <think>...</think> tags
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # If <think> tag was not closed (e.g. truncated response), remove from <think> to end
+    cleaned = re.sub(r'<think>.*$', '', cleaned, flags=re.DOTALL)
+    return cleaned.strip()
+
 def generate_groq_response(prompt: str) -> str:
    start = time.time()
    api_key = os.getenv("GROQ_API_KEY")
@@ -16,22 +27,26 @@ def generate_groq_response(prompt: str) -> str:
    client = Groq(api_key=api_key)
 
    try:
+      model_name = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
       response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=model_name,
             messages=[
                 
                 {"role": "system", "content": "You are a helpful AI assistant."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,     
-            max_tokens=512       
+            max_tokens=2048       
         )
+
       print(f"⏱️ Thời gian gọi Groq API: {time.time() - start:.2f} giây")
-      return response.choices[0].message.content.strip()
+      raw_content = response.choices[0].message.content or ""
+      return clean_llm_response(raw_content)
 
    except Exception as e:
         print("❌ Lỗi khi gọi Groq API:", e)
         return "Lỗi khi gọi mô hình."
+
 
 
 

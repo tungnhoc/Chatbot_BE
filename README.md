@@ -4,7 +4,7 @@
 
 Hệ thống được tích hợp với các công cụ hiện đại như **Groq** (Mô hình ngôn ngữ lớn - LLM), **Pinecone** (Cơ sở dữ liệu Vector), **MySQL/Supabase** (Cơ sở dữ liệu quan hệ), và **Upstash Redis** (Bộ nhớ đệm và xử lý tác vụ nền). Ngoài ra, hệ thống còn tích hợp một mô hình Học máy (Machine Learning) để đánh giá độ mạnh của mật khẩu nhằm tăng cường bảo mật trong quá trình đăng ký của người dùng.
 
-## 🚀 Các Tính Năng Chính
+Các Tính Năng Chính
 
 - **Xác thực JWT (JWT Authentication)**: Các chức năng đăng ký, đăng nhập, làm mới token và đăng xuất an toàn, bao gồm cả cơ chế thu hồi token (token blacklisting).
 - **Mô Hình Học Máy Đánh Giá Mật Khẩu**: Tích hợp một mô hình ML tuỳ chỉnh được huấn luyện để đánh giá và bắt buộc độ mạnh của mật khẩu khi người dùng đăng ký (được tích hợp trong `user_service`).
@@ -13,7 +13,7 @@ Hệ thống được tích hợp với các công cụ hiện đại như **Gro
 - **Quản Lý Cuộc Trò Chuyện**: Tạo, đổi tên, xoá và hiển thị danh sách các cuộc trò chuyện, cùng với toàn bộ lịch sử tin nhắn và quản lý file.
 - **Tích hợp Redis**: Sử dụng Upstash Redis cho các luồng xử lý chạy nền (background threads) và quản lý trạng thái.
 
-## 🛠️ Công Nghệ Sử Dụng
+Công Nghệ Sử Dụng
 
 - **Framework**: Flask, Gunicorn
 - **Cơ sở dữ liệu**: MySQL (PyMySQL, SQLAlchemy), Supabase
@@ -26,7 +26,7 @@ Hệ thống được tích hợp với các công cụ hiện đại như **Gro
 - **Xử lý ngôn ngữ tự nhiên (NLP)**: NLTK
 - **Xác thực dữ liệu**: Pydantic
 
-## 📂 Cấu Trúc Dự Án
+Cấu Trúc Dự Án
 
 ```
 chatbot/
@@ -46,7 +46,7 @@ chatbot/
 │   └── utils/            # Các hàm hỗ trợ (JWT manager, Redis listener, xử lý PDF)
 ```
 
-## ⚙️ Cài Đặt & Khởi Chạy
+Cài Đặt & Khởi Chạy
 
 1. **Clone repository:**
    ```bash
@@ -99,7 +99,7 @@ chatbot/
    ```
    Server sẽ khởi chạy tại địa chỉ `http://0.0.0.0:5000`.
 
-## 🔌 Các API Endpoints
+Các API Endpoints
 
 ### Xác thực / Authentication (`/api`)
 - `POST /register`: Đăng ký người dùng mới (có tích hợp kiểm tra mật khẩu bằng ML).
@@ -119,7 +119,7 @@ chatbot/
 ### Upload Tài Liệu (`/api`)
 - `POST /upload`: Tải lên tài liệu PDF, trích xuất văn bản, tạo vector nhúng và lưu vào Pinecone.
 
-## 🚀 Triển Khai (Deployment)
+Triển Khai (Deployment)
 
 Dự án này được cấu hình để có thể dễ dàng triển khai trên các nền tảng như **Railway**, **Render** hoặc **Heroku**. 
 Dự án sử dụng `gunicorn` làm HTTP server (WSGI) cho môi trường production:
@@ -127,5 +127,5 @@ Dự án sử dụng `gunicorn` làm HTTP server (WSGI) cho môi trường produ
 gunicorn -w 4 -b 0.0.0.0:$PORT src.app:app
 ```
 
-## 📝 Giấy Phép (License)
+Giấy Phép (License)
 Dự án này được thực hiện với mục đích giáo dục và phục vụ cho portfolio.
