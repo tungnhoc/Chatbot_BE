@@ -17,3 +17,5 @@ pydantic
 gradio_client
 flask-cors
 pdfplumber
+requests
+
