@@ -32,3 +32,6 @@ Thumbs.db
 # Logs / cache
 # ======================
 *.log
+
+storage/
+evaluation-results/

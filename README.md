@@ -1,3 +1,5 @@
+> **N?ng c?p v1:** xem [h??ng d?n ?a ??nh d?ng, worker, migration v? ??nh gi?](docs/UPGRADE_V1.md). Ph?n h??ng d?n c? b?n d??i c? endpoint/c?u h?nh ?? thay ??i.
+
 # RAG PDF Chatbot Backend
 
 Đây là repository backend cho dự án **RAG-based PDF Chatbot**, được xây dựng bằng **Python** và **Flask**. Hệ thống sử dụng công nghệ Retrieval-Augmented Generation (RAG) (Sinh văn bản tăng cường truy xuất) để cho phép người dùng tương tác thông minh với các tài liệu PDF đã tải lên.

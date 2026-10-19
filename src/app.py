@@ -11,7 +11,7 @@ from src.routes.upload_routes import upload_bp
 from src.routes.chat_routes import chat_bp
 from src.routes.auth_routes import auth_bp
 from src.utils.jwt_manager import init_jwt
-from src.utils.redis_listener import start_redis_watcher_thread
+from src.config.db_session import SessionLocal
 app = Flask(__name__)
 
 CORS(app)
@@ -26,7 +26,18 @@ def health():
 app.register_blueprint(auth_bp)
 app.register_blueprint(upload_bp)
 app.register_blueprint(chat_bp)
-start_redis_watcher_thread()
+# Session cleanup applies to all routes, including early/error returns.
+@app.teardown_appcontext
+def close_session(error=None):
+    SessionLocal.remove()
+
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
+@app.errorhandler(404)
+@app.errorhandler(409)
+@app.errorhandler(413)
+def client_error(error):
+    return {'error': error.description}, error.code
 
 import os
 

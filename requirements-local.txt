@@ -1,0 +1,4 @@
+# Optional local CPU embeddings; install in addition to requirements.txt.
+onnxruntime>=1.20,<2
+tokenizers>=0.21,<1
+huggingface-hub>=0.30,<2

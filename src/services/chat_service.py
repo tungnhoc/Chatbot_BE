@@ -3,10 +3,7 @@ from typing import List, Dict
 import json
 from sqlalchemy.exc import SQLAlchemyError
 from src.utils.redis import get_redis_client, get_redis_key
-from datetime import datetime
-from src.llm.prompt_builder import summarize_conversation, generate_answer
-from src.utils.pinecone_service import search_chunks, upsert_summary, search_summary
-from src.utils.text_preprocess import clean_text
+from src.llm.prompt_builder import generate_answer
 
 MAX_MESSAGES_IN_REDIS = 10
 KEEP_LAST_MESSAGES = 3
@@ -20,141 +17,16 @@ def save_message_to_redis_and_db(
     text_message: str, 
     is_summary: bool = False
 ) -> Dict:
-    try:
-        client = get_redis_client()  
-        redis_key = get_redis_key(user_id, conv_id)
-        
-        message = {
-            'role': role,
-            'text': text_message,
-            'timestamp': datetime.now().isoformat()
-        }
-        client.rpush(redis_key, json.dumps(message))
-        current_len = client.llen(redis_key)
-        client.expire(redis_key, 40)
-
-        print(f"Current messages in Redis for conv {conv_id}: {current_len}")
-        
-        summarized = False
-        
-        if current_len >= MAX_MESSAGES_IN_REDIS and not is_summary:
-
-            all_msgs_json = client.lrange(redis_key, -MAX_MESSAGES_IN_REDIS, -1)
-            all_msgs = [json.loads(m) for m in all_msgs_json]
-
-
-            msgs_to_save = all_msgs[:-KEEP_LAST_MESSAGES]  
-            msgs_for_summary = all_msgs  
-
-            history_str = "\n".join([f"{m['role']}: {m['text']}" for m in msgs_for_summary])
-            summary_text = summarize_conversation(history_str)  
-
-            batch_insert = text("""
-                INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
-                VALUES (:conv_id, :role, :text, :timestamp)
-            """)
-
-            try:
-                for msg in msgs_to_save:
-                    session.execute(batch_insert, {
-                        'conv_id': conv_id,
-                        'role': msg['role'],
-                        'text': msg['text'],
-                        'timestamp': datetime.fromisoformat(msg['timestamp'])
-                    })
-                session.commit()
-
-
-                insert_summary = text("""
-                    INSERT INTO VectorMemorySummary (ConversationID, SummaryText, CreatedAt)
-
-                    VALUES (:conv_id, :summary_text, NOW())
-                """)
-                result_summary = session.execute(insert_summary, {
-                    'conv_id': conv_id, 
-                    'summary_text': summary_text
-                })
-                summary_id = result_summary.lastrowid
-                session.commit()
-
-                if not summary_id:
-                    raise ValueError("Failed to create memory summary.")
-                
-                upsert_summary(summary_text=summary_text,summary_id=summary_id,user_id=user_id, conv_id=conv_id)
-
-                client.ltrim(redis_key, -KEEP_LAST_MESSAGES, -1)
-                summarized = True
-                print(f"Redis trimmed to {KEEP_LAST_MESSAGES} recent messages for conv {conv_id}")
-
-            except Exception as e:
-                session.rollback()
-                print("Error saving messages or summary:", e)
-
-        return {
-            "success": True,
-            "message_count": current_len,
-            "summarized": summarized
-        }
-    except Exception as redis_err:
-        print(f"⚠️ Redis không khả dụng ({redis_err}), chuyển sang lưu trực tiếp vào MySQL.")
-        try:
-            save_message(session, conv_id, role, text_message)
-        except Exception as db_err:
-            print(f"❌ Lỗi lưu tin nhắn vào MySQL: {db_err}")
-        return {"success": True, "fallback": True}
-
-
-def finalize_conversation(session, user_id: str, conv_id: int):
+    save_message(session, conv_id, role, text_message)
     try:
         client = get_redis_client()
-
-        redis_key = get_redis_key(user_id, conv_id)
-
-        remaining_json = client.lrange(redis_key, 0, -1)
-        remaining_msgs = [json.loads(x) for x in remaining_json]
-
-        history_str = "\n".join([f"{m['role']}: {m['text']}" for m in remaining_msgs])
-        summary_text = summarize_conversation(history_str)
-
-        batch_insert = text("""
-            INSERT INTO Messages (ConversationID, Role, Text, Timestamp)
-            VALUES (:conv_id, :role, :text, :timestamp)
-        """)
-
-        for msg in remaining_msgs:
-            session.execute(batch_insert, {
-                'conv_id': conv_id,
-                'role': msg["role"],
-                'text': msg["text"],
-                'timestamp': datetime.fromisoformat(msg["timestamp"])
-            })
-
-
-        session.commit()
-
-        insert_summary = text("""
-            INSERT INTO VectorMemorySummary (ConversationID, SummaryText, CreatedAt)
-            VALUES (:conv_id, :summary_text, NOW())
-        """)
-
-        result = session.execute(insert_summary, {
-            "conv_id": conv_id,
-            "summary_text": summary_text
-        })
-
-        summary_id = result.lastrowid
-        session.commit()
-
-        upsert_summary(summary_text, summary_id, user_id, conv_id)
-
-        return {"success": True}
-
-    except Exception as e:
-        session.rollback()
-        print(f"Error finalizing conversation {conv_id}: {e}")
-        return {"success": False, "error": str(e)}
-
-
+        key = get_redis_key(user_id, conv_id)
+        client.rpush(key, json.dumps({'role': role, 'text': text_message}))
+        client.ltrim(key, -10, -1)
+        client.expire(key, 3600)
+    except Exception:
+        pass  # MySQL is the durable source of truth.
+    return {'success': True}
 
 
 def get_last_messages_from_redis(user_id: str, conv_id: int, count:int = 5)->List[Dict]:
@@ -193,8 +65,6 @@ def create_new_conversation(session, user_id: str, title: str = 'New Chat')->int
         session.rollback()
         print(f"Database error: {e}")
         raise e
-    finally:
-        session.close()
 
 
 def get_conversations_list(session, user_id: str, limit: int = 20)->List[Dict]:
@@ -218,10 +88,10 @@ def get_conversations_list(session, user_id: str, limit: int = 20)->List[Dict]:
 
 def load_conversation_history(session, conversation_id: str, limit: int = 20, offset: int = 0) -> List[Dict]:
     query = text("""
-        SELECT Role, Text, Timestamp
-        FROM Messages
-        WHERE ConversationID = :conversation_id
-        ORDER BY Timestamp DESC
+        SELECT m.MessageID,m.Role,m.Text,m.Timestamp,t.TraceID,t.Payload
+        FROM Messages m LEFT JOIN ChatTraces t ON t.AssistantMessageID=m.MessageID
+        WHERE m.ConversationID = :conversation_id
+        ORDER BY m.Timestamp DESC, m.MessageID DESC
         LIMIT :limit OFFSET :offset
     """)
 
@@ -231,10 +101,14 @@ def load_conversation_history(session, conversation_id: str, limit: int = 20, of
             "offset": offset
         }).mappings().all()
 
-    messages = [
-            {"role": row["Role"], "text": row["Text"], "timestamp": row["Timestamp"]}
-            for row in result
-        ][::-1]
+    messages = []
+    for row in reversed(result):
+        payload = row['Payload'] or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        messages.append({'messageID': row['MessageID'], 'role': row['Role'], 'text': row['Text'],
+                         'timestamp': row['Timestamp'], 'sources': payload.get('sources', []),
+                         'trace_id': row['TraceID']})
 
     return messages
 
@@ -343,131 +217,94 @@ def generate_title_from_query(query_text: str) -> str:
         return clean[:35] + ("..." if len(clean) > 35 else "")
 
 
-def handle_chat_query(session, user_id: str, query_text: str, conversation_id: int = None, document_ids: List[int] = None, title: str = 'New Chat') -> Dict:
-    
-    if not conversation_id:
+def handle_chat_query(session, user_id: str, query_text: str, conversation_id: int = None,
+                      document_ids: List[int] = None, title: str = 'New Chat') -> Dict:
+    import os
+    import time
+    import uuid
+    from src.utils.pinecone_service import search_document_chunks
+    from werkzeug.exceptions import NotFound, Conflict
+    started = time.perf_counter()
+    if conversation_id:
+        conv = session.execute(text('SELECT Title FROM Conversations WHERE ConversationID=:cid AND UserID=:uid'),
+                               {'cid': conversation_id, 'uid': user_id}).first()
+        if not conv:
+            raise NotFound('Conversation not found')
+        title = conv[0]
+    else:
         conversation_id = create_new_conversation(session, user_id, title)
-    else:
-        print(f"Sử dụng ConversationID có sẵn: {conversation_id}")
-
-    # Kiểm tra và tự động tóm tắt tạo tiêu đề nếu đang dùng tên mặc định
-    check_title_query = text("SELECT Title FROM Conversations WHERE ConversationID = :conv_id")
-    conv_row = session.execute(check_title_query, {"conv_id": conversation_id}).fetchone()
-    current_db_title = conv_row[0] if conv_row else title
-
-    new_generated_title = None
-    if is_generic_title(current_db_title):
-        new_generated_title = generate_title_from_query(query_text)
-        if new_generated_title:
-            try:
-                update_title_query = text("UPDATE Conversations SET Title = :new_title, UpdatedAt = NOW() WHERE ConversationID = :conv_id")
-                session.execute(update_title_query, {"new_title": new_generated_title, "conv_id": conversation_id})
-                session.commit()
-                current_db_title = new_generated_title
-            except Exception as e:
-                session.rollback()
-                print("❌ Lỗi cập nhật tiêu đề DB:", e)
-    
-    context = []
-
-    if document_ids and len(document_ids) > 0:
-        all_chunk_ids = []
-
-        for doc_id in document_ids:
-            filename_query = text("""
-                SELECT FileName FROM Documents
-                WHERE DocumentID = :doc_id AND UploadedBy = :user_id
-            """)
-            filename_result = session.execute(filename_query, {'doc_id': doc_id, 'user_id': user_id})
-            filename_row = filename_result.fetchone()
-
-            if not filename_row:
-                print(f"Không tìm thấy document trong DB với DocumentID={doc_id}, UserID={user_id}")
-                continue
-            filename = filename_row[0]
-            faiss_doc_name = f"{filename.replace('.pdf', '')}_{doc_id}"
-            try:
-                top_chunk_ids = search_chunks(query=query_text, user_id=user_id, document_id=doc_id)
-                if top_chunk_ids:
-                    all_chunk_ids.extend(top_chunk_ids)
-                else:
-                    print(f"Không tìm thấy chunk nào phù hợp trong Pipecone cho {faiss_doc_name}.")
-            except Exception as e:
-                print(f"Lỗi khi tìm vector trong Pipecone: {e}")
-                continue
-
-        if all_chunk_ids:
-            try:
-                chunks = get_chunks_by_ids(session, all_chunk_ids)
-                if not chunks:
-                    print("Không lấy được chunk nào từ DB.")
-                else:
-                    for chunk in chunks:
-                        page = chunk.get('page_num', 'N/A')
-                        text_snippet = chunk['text'][:300] + '...' if len(chunk['text']) > 300 else chunk['text']
-                        context.append(f"[Page {page}] {text_snippet}")
-                    print(" lấy được chunk nào từ DB.")
-            except Exception as e:
-                print(f"Lỗi khi lấy chunk từ DB: {e}")
-        else:
-            print("Không có chunk_id nào được tìm thấy để lấy context.")
-    else:
-        print("Không có document nào được cung cấp → bỏ qua phần tìm context.")
-    print(" tiep tuc di.")
-
-    summary_ids = search_summary(query=query_text, user_id=user_id, conv_id=conversation_id)
-
-    if summary_ids:
-        get_summary = get_summarys_by_ids(session, summary_ids)
-    else:
-        get_summary = []
-    
-    get_last_messages = get_last_messages_from_redis(user_id, conversation_id, count=3)
-    messages_recently = join_message_texts(get_last_messages)
-
-    print("redis ok")
-    print("\nĐang gọi Grok LLM...")
+    params = {'cid': conversation_id, 'uid': user_id}
+    allowed = session.execute(text("""SELECT d.DocumentID,d.FileName,j.Status
+        FROM ConversationDocuments cd JOIN Documents d ON d.DocumentID=cd.DocumentID
+        JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
+        WHERE cd.ConversationID=:cid AND cd.IsDeleted=0 AND d.UploadedBy=:uid"""), params).mappings().all()
+    by_id = {r['DocumentID']: r for r in allowed}
+    selected = list(dict.fromkeys(document_ids)) if document_ids is not None else list(by_id)
+    if any(doc not in by_id for doc in selected):
+        raise NotFound('Document not found in this conversation')
+    if document_ids and any(by_id[doc]['Status'] != 'ready' for doc in selected):
+        raise Conflict('Selected documents are not ready')
+    selected = [doc for doc in selected if by_id[doc]['Status'] == 'ready']
+    if document_ids is None and by_id and not selected:
+        raise Conflict('No ready documents in this conversation')
+    retrieved = []
+    if selected:
+        matches = search_document_chunks(query_text, str(user_id), selected, top_k=8)
+        ids = [int(m['chunk_id']) for m in matches]
+        if ids:
+            bindings = {f'c{i}': cid for i, cid in enumerate(ids)}
+            placeholders = ','.join(':'+key for key in bindings)
+            # Recheck ownership and readiness in SQL; vector metadata is not an authorization boundary.
+            rows = session.execute(text(f"""SELECT c.ChunkID,c.ChunkText,c.Metadata,d.DocumentID,d.FileName
+                FROM DocumentChunks c JOIN Documents d ON d.DocumentID=c.DocumentID
+                JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
+                JOIN ConversationDocuments cd ON cd.DocumentID=d.DocumentID
+                WHERE c.ChunkID IN ({placeholders}) AND d.UploadedBy=:uid
+                AND cd.ConversationID=:cid AND cd.IsDeleted=0 AND j.Status='ready'"""),
+                {**bindings, **params}).mappings().all()
+            rows_by_id = {r['ChunkID']: r for r in rows if r['DocumentID'] in selected}
+            for match in matches:
+                row = rows_by_id.get(int(match['chunk_id']))
+                if row:
+                    metadata = row['Metadata']
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    retrieved.append({'chunk_id': row['ChunkID'], 'document_id': row['DocumentID'],
+                                      'filename': row['FileName'], 'text': row['ChunkText'],
+                                      'score': match['score'], **(metadata or {})})
+    sources, context = [], []
+    budget = 16000
+    for chunk in retrieved:
+        if len(chunk['text']) > budget:
+            continue
+        budget -= len(chunk['text'])
+        source = {k: v for k, v in chunk.items() if k != 'text'}
+        source['id'] = 'S' + str(len(sources) + 1)
+        sources.append(source)
+        context.append({'source': source, 'text': chunk['text']})
+    history = load_conversation_history(session, conversation_id, limit=6)
+    recent = '\n'.join(f"{m['role']}: {m['text']}" for m in history)
+    # Retrieval failures propagate as errors, rather than producing unsupported document answers.
+    answer = generate_answer(query_text, json.dumps(context, ensure_ascii=False), messages_recently=recent)
+    trace_id = uuid.uuid4().hex
+    payload = {'query': query_text, 'answer': answer, 'retrieved': retrieved, 'context': context,
+               'sources': sources, 'latency_ms': round((time.perf_counter()-started)*1000, 2),
+               'model': (os.getenv('GROQ_MODEL') or 'openai/gpt-oss-20b'),
+               'pipeline_version': 'multiformat-v1', 'prompt_version': 'grounded-v1'}
+    from src.llm.llm_client import get_last_usage
+    payload['usage'] = get_last_usage()
+    payload['embedding_backend'] = os.getenv('EMBEDDING_BACKEND', 'huggingface')
+    payload['vector_namespace'] = os.getenv('PINECONE_NAMESPACE', '')
     try:
-        llm_response = generate_answer(
-            user_query=query_text,
-            retrieved_context = "\n".join(context) if context else None,
-            conversation_summary="\n".join(get_summary) if get_summary else None,
-            messages_recently="\n".join(messages_recently ) if messages_recently  else None
-        )
-        print("LLM trả về phản hồi thành công.")
-    except Exception as e:
-        print(f"Lỗi khi gọi LLM: {e}")
-        llm_response = "Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi của bạn."
-
-    print("\nĐang lưu tin nhắn vào Redis/DB...")
-    try:
-        save_message_to_redis_and_db(
-            session=session, 
-            user_id=user_id,
-            conv_id=conversation_id,
-            role='user',
-            text_message=query_text,
-            is_summary=False
-        )
-        save_message_to_redis_and_db(
-            session=session, 
-            user_id=user_id,
-            conv_id=conversation_id,
-            role='assistant',
-            text_message=llm_response,
-            is_summary=False
-        )
-        print("Tin nhắn đã được lưu.")
-    except Exception as e:
-        print(f"Lỗi khi lưu message: {e}")
-
-    return {
-        "response": llm_response,
-        "conversation_id": conversation_id,
-        "title": current_db_title
-    }    
-
-
-
-    
-   
+        for role, body in [('user', query_text), ('assistant', answer)]:
+            inserted = session.execute(text('INSERT INTO Messages (ConversationID,Role,Text) VALUES (:cid,:role,:body)'),
+                            {'cid': conversation_id, 'role': role, 'body': body})
+        session.execute(text('UPDATE Conversations SET UpdatedAt=CURRENT_TIMESTAMP WHERE ConversationID=:cid'), params)
+        session.execute(text('INSERT INTO ChatTraces (TraceID,UserID,ConversationID,Payload,AssistantMessageID) VALUES (:id,:uid,:cid,:payload,:message_id)'),
+                        {**params, 'id': trace_id, 'message_id': inserted.lastrowid, 'payload': json.dumps(payload, ensure_ascii=False)})
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return {'response': answer, 'conversation_id': conversation_id, 'title': title,
+            'sources': sources, 'trace_id': trace_id}

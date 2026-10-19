@@ -2,24 +2,39 @@ from src.utils.pipecone_chunk_clinet import get_pipecone_chunk_index
 from src.utils.pipecone_summary_clinet import get_pipecone_summary_index
 from typing import List, Tuple, Dict
 from src.utils.embedding_utils import get_embeddings
+import os
+
+
+def _namespace():
+    value = os.getenv('PINECONE_NAMESPACE', '')
+    if os.getenv('EMBEDDING_BACKEND') == 'local-onnx' and not value:
+        raise ValueError('Use a separate PINECONE_NAMESPACE for local embeddings and re-ingest documents')
+    return {'namespace': value} if value else {}
 
 
 def upsert_chunks(chunk_ids: List[str], texts: List[str], user_id:str, document_id: int):
     index = get_pipecone_chunk_index()
-    embeddings = get_embeddings(texts)
-    vectors = []
-    for chunk_id, embedding in zip(chunk_ids, embeddings):
-        vectors.append(({
-            "id": f"pdf_{user_id}_{document_id}_{chunk_id}",
-            "values": embedding.tolist(),
-            "metadata": {
-                "user_id": user_id,
-                "document_id": document_id,
-                "chunk_id": chunk_id
-            }
-        }))
-    index.upsert(vectors=vectors)
+    if len(chunk_ids) != len(texts):
+        raise ValueError('Chunk/text count mismatch')
+    for start in range(0, len(texts), 32):
+        embeddings = get_embeddings(texts[start:start+32])
+        vectors = []
+        for chunk_id, embedding in zip(chunk_ids[start:start+32], embeddings):
+            vectors.append({'id': f'pdf_{user_id}_{document_id}_{chunk_id}',
+                'values': embedding.tolist(), 'metadata': {
+                    'user_id': str(user_id), 'document_id': document_id, 'chunk_id': chunk_id}})
+        index.upsert(vectors=vectors, **_namespace())
     print("Thành công upsert chunk lên Pipecone")
+
+
+def search_document_chunks(query, user_id, document_ids, top_k=8):
+    if not document_ids:
+        return []
+    response = get_pipecone_chunk_index().query(
+        vector=get_embeddings(query)[0].tolist(), top_k=top_k, include_metadata=True,
+        filter={'user_id': {'$eq': str(user_id)}, 'document_id': {'$in': document_ids}}, **_namespace())
+    return [{'chunk_id': int(m['metadata']['chunk_id']), 'score': float(m['score'])}
+            for m in response['matches']]
 
 
 

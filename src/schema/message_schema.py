@@ -1,9 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 
 class MessageItemSchema(BaseModel):
+    messageID: Optional[int] = None
+    sources: List[dict] = Field(default_factory=list)
+    trace_id: Optional[str] = None
     role: str
     text: str
     timestamp: datetime

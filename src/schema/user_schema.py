@@ -14,7 +14,7 @@ class UserOutSchema(BaseModel):
     Role: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 

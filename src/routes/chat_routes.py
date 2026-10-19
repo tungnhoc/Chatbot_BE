@@ -1,3 +1,6 @@
+from src.llm.llm_client import LanguageModelRateLimited, LanguageModelUnavailable
+from werkzeug.exceptions import HTTPException
+import json
 from flask import Blueprint, request, jsonify
 from src.services.chat_service import(
     handle_chat_query,
@@ -19,6 +22,19 @@ from src.schema.chat_schema import ChatRequestSchema, ChatResponseSchema
 
 chat_bp = Blueprint('chat', __name__, url_prefix='/api')
 
+
+@chat_bp.route('/chat/traces/<string:trace_id>', methods=['GET'])
+@jwt_required()
+def get_chat_trace(trace_id):
+    session = SessionLocal()
+    try:
+        payload = session.execute(text('SELECT Payload FROM ChatTraces WHERE TraceID=:id AND UserID=:uid'),
+                                  {'id': trace_id, 'uid': get_jwt_identity()}).scalar()
+        if payload is None:
+            return jsonify(error='Trace not found'), 404
+        return jsonify(json.loads(payload) if isinstance(payload, str) else payload), 200
+    finally:
+        session.close()
 
 
 @chat_bp.route('/conversations', methods=['GET'])
@@ -136,17 +152,22 @@ def load_conversation_files(conv_id: int):
 
     try:
         query = text("""
-            SELECT DocumentID, FileURL, UploadedAt
-            FROM ConversationDocuments
-            WHERE ConversationID = :conv_id AND IsDeleted = 0
+            SELECT cd.DocumentID, cd.FileURL, cd.UploadedAt, d.FileName, j.Status
+            FROM ConversationDocuments cd
+            JOIN Conversations c ON c.ConversationID=cd.ConversationID
+            JOIN Documents d ON d.DocumentID=cd.DocumentID
+            LEFT JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
+            WHERE cd.ConversationID = :conv_id AND c.UserID=:user_id AND cd.IsDeleted = 0
             ORDER BY UploadedAt DESC
         """)
         
-        rows = session.execute(query, {'conv_id': conv_id}).mappings().all()
+        rows = session.execute(query, {'conv_id': conv_id, 'user_id': user_id}).mappings().all()
 
         files = [
             {
                 'id': row['DocumentID'],
+                'filename': row['FileName'],
+                'status': row['Status'],
                 'url': row['FileURL'],
                 'uploadedAt': row['UploadedAt']
             } for row in rows
@@ -291,9 +312,17 @@ def chat():
         response_schema = ChatResponseSchema(
             conversation_id=result["conversation_id"],
             response=result["response"],
-            title=result.get("title")
+            title=result.get("title"),
+            sources=result.get("sources", []),
+            trace_id=result.get("trace_id")
         )
         return jsonify(response_schema.model_dump()), 200
+    except LanguageModelRateLimited as error:
+        return jsonify(error=str(error)), 429, {'Retry-After': '10'}
+    except LanguageModelUnavailable:
+        return jsonify(error='AI service is temporarily unavailable'), 503
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()

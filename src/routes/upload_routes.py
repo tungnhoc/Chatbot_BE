@@ -1,120 +1,63 @@
 from flask import Blueprint, request, jsonify
-from src.services.document_service import upload_pdf_service1
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from sqlalchemy.exc import SQLAlchemyError
-from src.schema.uploadpdf_schema import (
-    UploadPDFResponseSchema,
-    UploadPDFResultSchema,
-    UploadPDFSchema
-)
 from sqlalchemy import text
 from src.config.db_session import SessionLocal
+from src.services.document_service import enqueue_document
 
 upload_bp = Blueprint('upload', __name__, url_prefix='/api')
 
 
 @upload_bp.route('/upload_pdf/<int:conversation_id>', methods=['POST'])
+@upload_bp.route('/conversations/<int:conversation_id>/documents', methods=['POST'])
 @jwt_required()
-def upload_pdf_for_conversation(conversation_id):
-
+def upload_documents(conversation_id):
+    uid = get_jwt_identity()
     files = request.files.getlist('files')
-    if not files or all(f.filename == '' for f in files):
-        return jsonify({'success': False, 'message': 'No file selected'}), 400
-
-    user_id = get_jwt_identity()
-
-    try:
-        form_schema = UploadPDFSchema(**request.form)
-        description = form_schema.description
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": f"Invalid form data: {str(e)}"
-        }), 400
-
+    if not files or len(files) > 10:
+        return jsonify(error='Upload between 1 and 10 files'), 400
+    description = request.form.get('description', '')
+    if len(description) > 500:
+        return jsonify(error='Description exceeds 500 characters'), 400
     session = SessionLocal()
-    results = []
-    success_count = 0
-
     try:
-        check_query = text("""
-            SELECT ConversationID
-            FROM Conversations
-            WHERE ConversationID = :cid AND UserID = :uid
-        """)
-        owned = session.execute(
-            check_query,
-            {"cid": conversation_id, "uid": user_id}
-        ).fetchone()
-
-        if not owned:
-            return jsonify({
-                "success": False,
-                "message": "Conversation not found or not owned by user"
-            }), 404
-        
+        if not session.execute(text('SELECT ConversationID FROM Conversations WHERE ConversationID=:cid AND UserID=:uid'),
+                               {'cid': conversation_id, 'uid': uid}).first():
+            return jsonify(error='Conversation not found'), 404
+        results = []
         for file in files:
-            if not file.filename.lower().endswith('.pdf'):
-                results.append(
-                    UploadPDFResultSchema(
-                        success=False,
-                        error=f"Invalid file: {file.filename}. Only PDF allowed."
-                    ).model_dump()
-                )
-                continue
-
-            upload_result = upload_pdf_service1(
-                session=session,
-                file=file,
-                uploaded_by=user_id,
-                description=description
-            )
-
-            if not upload_result.get("success"):
-                results.append(
-                    UploadPDFResultSchema(
-                        success=False,
-                        error=upload_result.get("error")
-                    ).model_dump()
-                )
-                continue
-
-            document_id = upload_result["document_id"]
-            success_count += 1
-
-            results.append(
-                UploadPDFResultSchema(
-                    success=True,
-                    document_id=document_id,
-                    file_url=None,
-                    message=f"Uploaded: {file.filename}"
-                ).model_dump()
-            )
-
-        session.commit()
-
-    except SQLAlchemyError as e:
-        session.rollback()
-        return jsonify({
-            "success": False,
-            "message": "Database error",
-            "detail": str(e)
-        }), 500
-
-    except Exception as e:
-        session.rollback()
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        }), 500
-
+            try:
+                results.append(enqueue_document(session, file, uid, conversation_id, description))
+            except ValueError as exc:
+                results.append({'success': False, 'filename': file.filename, 'error': str(exc)})
+        return jsonify(success=any(r['success'] for r in results), conversation_id=conversation_id,
+                       results=results), (202 if any(r['success'] for r in results) else 400)
     finally:
-        session.close()
+        SessionLocal.remove()
 
-    response = UploadPDFResponseSchema(
-        success=success_count > 0,
-        conversation_id=conversation_id,
-        results=results
-    )
 
-    return jsonify(response.model_dump()), (201 if success_count > 0 else 400)
+@upload_bp.route('/documents/<int:document_id>/status', methods=['GET'])
+@jwt_required()
+def document_status(document_id):
+    session = SessionLocal()
+    try:
+        row = session.execute(text('''SELECT JobID AS job_id, DocumentID AS document_id,
+            Status AS status, Attempts AS attempts, Error AS error FROM IngestionJobs
+            WHERE DocumentID=:doc AND UserID=:uid'''),
+            {'doc': document_id, 'uid': get_jwt_identity()}).mappings().first()
+        return (jsonify(dict(row)), 200) if row else (jsonify(error='Document not found'), 404)
+    finally:
+        SessionLocal.remove()
+
+
+@upload_bp.route('/documents/<int:document_id>/retry', methods=['POST'])
+@jwt_required()
+def retry_document(document_id):
+    session = SessionLocal()
+    try:
+        result = session.execute(text('''UPDATE IngestionJobs SET Status='queued',Attempts=0,
+            Error=NULL,NextAttemptAt=CURRENT_TIMESTAMP WHERE DocumentID=:doc AND UserID=:uid AND Status='failed' '''),
+            {'doc': document_id, 'uid': get_jwt_identity()})
+        session.commit()
+        return (jsonify(status='queued'), 202) if result.rowcount else (jsonify(error='Failed document not found'), 404)
+    finally:
+        SessionLocal.remove()

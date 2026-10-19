@@ -1,128 +1,73 @@
+"""Persist originals and enqueue ingestion without external API calls."""
+import hashlib
 import os
-import json
-from datetime import datetime
-from typing import List, Tuple, Dict
-from werkzeug.utils import secure_filename
-from sqlalchemy.exc import SQLAlchemyError
+import uuid
+from pathlib import Path
 from sqlalchemy import text
-from src.utils.pdf_loader import load_pdf_text, split_text_into_chunks, load_pdf_text_from_bytes
-from src.utils.text_preprocess import preprocess_text
-from src.utils.pinecone_service import upsert_chunks
-import traceback
+from sqlalchemy.exc import IntegrityError
+from src.ingestion.readers import SUPPORTED
+from src.ingestion.chunker import PIPELINE_VERSION
+
+MAX_FILE_BYTES = 20 * 1024 * 1024
 
 
+def storage_root():
+    root = Path(os.getenv('DOCUMENT_STORAGE_DIR', 'storage/documents')).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
-def save_pdf_metadata(session, uploaded_by: str, filename: str, filepath: str, filetype: str, filesize_mb: float, description: str = " " ) -> int:
+
+def enqueue_document(session, file, user_id, conversation_id, description=''):
+    filename = Path((file.filename or '').replace('\\', '/')).name
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED:
+        raise ValueError('Supported formats: PDF, DOCX, TXT, MD, CSV, XLSX')
+    if len(filename) > 255:
+        raise ValueError('Filename is too long')
+    job_id = uuid.uuid4().hex
+    path = storage_root() / (job_id + ext)
+    digest = hashlib.sha256()
+    size = 0
     try:
-        insert_pdf = text("""
-            INSERT INTO Documents (FileName, FilePath, FileType, UploadedBy, UploadedAt, FileSizeMB, Description)
-            VALUES (:filename, :filepath, :filetype, :uploaded_by, NOW(), :filesize_mb, :description)
-        """)
-        result = session.execute(insert_pdf, {
-            'filename': filename,
-            'filepath': filepath,
-            'filetype': "PDF",  
-            'uploaded_by': int(uploaded_by),
-            'filesize_mb': filesize_mb,
-            'description': description
-        })
-        document_id = result.lastrowid
-        session.commit()  
-        
-        if not document_id:
-            raise Exception("Failed to retrieve DocumentID after insertion.")
-        
-        return document_id
-    except SQLAlchemyError as e:
-        session.rollback()
-        print(f"Database error: {e}")
-        raise
-
-    
-
-
-def process_and_save_chunks1(session, document_id: int, pdf_bytes: bytes):
-    try:
-        pages_data = load_pdf_text_from_bytes(pdf_bytes)
-        chunks = split_text_into_chunks(pages_data)
-
-        chunk_ids = []
-        texts = []
-
-        for chunk in chunks:
-            processed_text = preprocess_text(chunk['text'])
-
-            metadata = json.dumps({
-                "page": chunk['page_num'],
-                "start_pos": chunk['start_pos']
-            })
-
-            insert_stmt = text("""
-                INSERT INTO DocumentChunks (DocumentID, ChunkText, Metadata, CreatedAt)
-                VALUES (:document_id, :chunk_text, :metadata, NOW())
-            """)
-
-            result = session.execute(insert_stmt, {
-                "document_id": document_id,
-                "chunk_text": processed_text,
-                "metadata": metadata,
-            })
-
-            cid = result.lastrowid
-            if cid:
-                chunk_ids.append(cid)
-                texts.append(processed_text)
-
+        with path.open('xb') as target:
+            while True:
+                block = file.stream.read(65536)
+                if not block:
+                    break
+                size += len(block)
+                if size > MAX_FILE_BYTES:
+                    raise ValueError('File exceeds 20 MiB')
+                digest.update(block)
+                target.write(block)
+        if not size:
+            raise ValueError('Empty document')
+        params = {'uid': user_id, 'hash': digest.hexdigest(), 'version': PIPELINE_VERSION}
+        existing = session.execute(text('''SELECT JobID,DocumentID,Status FROM IngestionJobs
+            WHERE UserID=:uid AND ContentHash=:hash AND PipelineVersion=:version'''), params).mappings().first()
+        if existing:
+            path.unlink(missing_ok=True)
+            job_id, doc_id, status = existing['JobID'], existing['DocumentID'], existing['Status']
+        else:
+            result = session.execute(text('''INSERT INTO Documents
+                (FileName,FilePath,FileType,UploadedBy,FileSizeMB,Description)
+                VALUES (:name,:path,:type,:uid,:size,:description)'''),
+                {'name': filename, 'path': str(path), 'type': ext[1:].upper(),
+                 'uid': user_id, 'size': size / 1048576, 'description': description})
+            doc_id = result.lastrowid
+            session.execute(text('''INSERT INTO IngestionJobs
+                (JobID,DocumentID,UserID,ContentHash,PipelineVersion) VALUES (:job,:doc,:uid,:hash,:version)'''),
+                {**params, 'job': job_id, 'doc': doc_id})
+            status = 'queued'
+        link = {'cid': conversation_id, 'doc': doc_id}
+        if session.execute(text('SELECT DocumentID FROM ConversationDocuments WHERE ConversationID=:cid AND DocumentID=:doc'), link).first():
+            session.execute(text('UPDATE ConversationDocuments SET IsDeleted=0 WHERE ConversationID=:cid AND DocumentID=:doc'), link)
+        else:
+            session.execute(text('INSERT INTO ConversationDocuments (ConversationID,DocumentID) VALUES (:cid,:doc)'), link)
         session.commit()
-        return chunk_ids, texts
-
-    except Exception as e:
+        return {'success': True, 'document_id': doc_id, 'job_id': job_id, 'status': status}
+    except Exception as exc:
         session.rollback()
-        raise e
-
-
-
-
-def upload_pdf_service1(session, file, uploaded_by: str, filename: str = None, description: str = ""):
-    if not filename:
-        filename = secure_filename(file.filename)
-
-    if not filename.lower().endswith(".pdf"):
-        return {"success": False, "message": "Only PDF files are allowed."}
-
-    pdf_bytes = file.read()
-
-    # Tính size
-    file_size_mb = len(pdf_bytes) / (1024 * 1024)
-
-    try:
-        document_id = save_pdf_metadata(
-            session,
-            uploaded_by,
-            filename,
-            filepath=filename,     
-            filetype="PDF",
-            filesize_mb=file_size_mb,
-            description=description
-        )
-        print("Save metadata OK")
-        chunk_ids, texts = process_and_save_chunks1(session, document_id, pdf_bytes)
-        print(f"Step 2: Generated {len(chunk_ids)} chunks")
-        if not chunk_ids:
-            raise ValueError("No chunks generated.")
-        print("Step 3: Upserting to Pinecone...")
-        upsert_chunks(chunk_ids, texts, user_id=uploaded_by, document_id=document_id)
-        print("Step 4: Pinecone upsert OK")
-        return {
-            "success": True,
-            "document_id": document_id,
-            "message": f'PDF "{filename}" uploaded successfully with {len(chunk_ids)} chunks.'
-        }
-
-    except Exception as e:
-        traceback.print_exc()   
-        return {"success": False, "error": str(e)}
-
-   
-
-
+        path.unlink(missing_ok=True)
+        if isinstance(exc, IntegrityError):
+            raise ValueError('Concurrent upload or conversation removed; retry upload') from None
+        raise

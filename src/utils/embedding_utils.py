@@ -1,39 +1,43 @@
-import numpy as np
 import os
+import time
+import numpy as np
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+MODEL_ID = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+API_URL = f'https://router.huggingface.co/hf-inference/models/{MODEL_ID}/pipeline/feature-extraction'
 
-MODEL_ID = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}/pipeline/feature-extraction"
-
-headers = {
-    "Authorization": f"Bearer {os.environ['HF_TOKEN']}",
-    "Content-Type": "application/json"
-}
 
 def get_embeddings(texts):
-    if isinstance(texts, str):
-        texts = [texts]
-    payload = {"inputs": texts}
-
-    response = requests.post(API_URL, headers=headers, json=payload)
-
-    try:
-        data = response.json()
-    except:
-        raise Exception(f"Invalid JSON response: {response.text}")
-
-    if isinstance(data, dict) and "error" in data:
-        raise Exception(f"HuggingFace API Error: {data['error']}")
-
-    if "embeddings" in data:
-        return np.array(data["embeddings"], dtype=np.float32)
-
-    return np.array(data, dtype=np.float32)
-
-# embs = get_embeddings("hello world")
-
-# print("Embedding shape:", embs.shape)     # (1, 384)
-# print("Vector dimension:", len(embs[0]))  # 384
+    texts = [texts] if isinstance(texts, str) else texts
+    if not texts:
+        return np.empty((0, 384), dtype=np.float32)
+    if os.getenv('EMBEDDING_BACKEND', 'huggingface') == 'local-onnx':
+        from src.utils.local_embeddings import encode
+        return encode(texts)
+    token = os.getenv('HF_TOKEN')
+    if not token:
+        raise ValueError('HF_TOKEN is required for embeddings')
+    for attempt in range(3):
+        try:
+            response = requests.post(API_URL, headers={'Authorization': f'Bearer {token}'},
+                                     json={'inputs': texts}, timeout=(10, 60))
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                data = data.get('embeddings')
+            result = np.asarray(data, dtype=np.float32)
+            if result.ndim == 1 and len(texts) == 1:
+                result = result.reshape(1, -1)
+            if result.shape != (len(texts), 384) or not np.isfinite(result).all():
+                raise ValueError('Embedding response must contain one finite 384D vector per input')
+            return result
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
