@@ -10,7 +10,7 @@ class Conversations(Base):
 
     UserID = Column(
         Integer,
-        ForeignKey("Users.UserID", ondelete="CASCADE"),
+        ForeignKey("users.UserID", ondelete="CASCADE"),
         nullable=False
     )
 

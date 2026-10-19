@@ -14,7 +14,7 @@ class Documents(Base):
 
     UploadedBy = Column(
         Integer,
-        ForeignKey("Users.UserID", ondelete="SET NULL"),
+        ForeignKey("users.UserID", ondelete="SET NULL"),
         nullable=True
     )
 

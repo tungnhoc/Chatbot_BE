@@ -1,4 +1,4 @@
-CREATE TABLE Users (
+CREATE TABLE users (
     UserID INT AUTO_INCREMENT PRIMARY KEY,
     UserName VARCHAR(100) NOT NULL,
     Email VARCHAR(255) UNIQUE,
@@ -18,7 +18,7 @@ CREATE TABLE Documents (
 
     CONSTRAINT FK_Documents_Users
         FOREIGN KEY (UploadedBy)
-        REFERENCES Users(UserID)
+        REFERENCES users(UserID)
         ON DELETE SET NULL
 );
 CREATE TABLE DocumentChunks (
@@ -46,7 +46,7 @@ CREATE TABLE Conversations (
 
     CONSTRAINT FK_Conversations_Users
         FOREIGN KEY (UserID)
-        REFERENCES Users(UserID)
+        REFERENCES users(UserID)
         ON DELETE CASCADE
 );
 

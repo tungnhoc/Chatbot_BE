@@ -1,3 +1,5 @@
+from sqlalchemy.exc import IntegrityError
+import logging
 from datetime import timedelta
 from flask_jwt_extended import (
     create_access_token, create_refresh_token
@@ -22,7 +24,7 @@ def register_service(session, data):
             return {"error": "Missing email or password"}, 400
  
         if User.get_by_emails(session, email):
-            return {"error": "Email already exists"}, 409 
+            return {"error": "Email already exists", "code": "email_exists"}, 409
         new_user = User(
             UserName=email,
             Email=email,
@@ -33,9 +35,18 @@ def register_service(session, data):
         
         return {"message": "User registered successfully"}, 201
 
-    except Exception as e:
+    except IntegrityError as error:
         session.rollback()
-        return {"error": str(e)}, 500
+        # MySQL 1062: also handle simultaneous registration of the same email.
+        if getattr(error.orig, 'args', (None,))[0] == 1062:
+            return {'error': 'Email already exists', 'code': 'email_exists'}, 409
+        logging.getLogger(__name__).warning('Registration integrity failure')
+        return {'error': 'Registration service unavailable', 'code': 'registration_unavailable'}, 503
+    except Exception as error:
+        session.rollback()
+        logging.getLogger(__name__).warning('Registration failed: %s', type(error).__name__)
+        return {'error': 'Registration service unavailable', 'code': 'registration_unavailable'}, 503
+
 
 def login_service(session, data):
     try:

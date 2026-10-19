@@ -17,23 +17,23 @@ auth_bp = Blueprint("auth", __name__,  url_prefix='/api')
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error='Request body must be a JSON object', code='invalid_input'), 400
     try:
-        data = UserRegisterSchema(**request.json)
-    except ValidationError as e:
-        return jsonify({
-            "error": "Invalid input: Password must be at least 6 characters.",
-            "details": e.errors()
-        }), 400
-    
+        data = UserRegisterSchema(**payload)
+    except ValidationError as error:
+        # Do not echo Pydantic input values (especially passwords) to clients or logs.
+        details = [{'field': '.'.join(str(part) for part in item['loc']), 'message': item['msg']}
+                   for item in error.errors()]
+        return jsonify(error='Invalid email or password (minimum 6 characters)',
+                       code='invalid_input', details=details), 400
     session = SessionLocal()
-
-    response_data, status_code = register_service(session, data)
-    session.close()
-    if "error" in response_data:
-        return jsonify(response_data), 401 
-    
-    return jsonify(response_data), status_code
-
+    try:
+        response_data, status_code = register_service(session, data)
+        return jsonify(response_data), status_code
+    finally:
+        session.close()
 
 
 @auth_bp.route('/login', methods=['POST'])

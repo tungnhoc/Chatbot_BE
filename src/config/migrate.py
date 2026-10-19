@@ -1,30 +1,31 @@
 """Apply the v1 upgrade to an existing MySQL schema. Does not run on app startup."""
 from pathlib import Path
+import re
 from sqlalchemy import inspect, text
 from src.config.db_session import engine
+
+
+def user_table_sql(statement):
+    """Adapt historical SQL table identifiers without rewriting migration files."""
+    statement = re.sub(r'\bALTER TABLE Users\b', 'ALTER TABLE users', statement)
+    return re.sub(r'\bREFERENCES Users(?=\s*\()', 'REFERENCES users', statement)
 
 
 def main():
     if engine.dialect.name != 'mysql':
         raise RuntimeError('Upgrade requires MySQL')
     inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    if 'Users' not in tables and 'users' not in tables:
+    if not inspector.has_table('users'):
         raise RuntimeError('Initialize base tables from mysql.sql first')
-    # Do not silently rename a live case-sensitive deployment.
-    with engine.connect() as connection:
-        case_mode = connection.execute(text('SELECT @@lower_case_table_names')).scalar_one()
-    if 'Users' not in tables and 'users' in tables and case_mode == 0:
-        raise RuntimeError('Normalize the existing users table to Users before migrating')
     migration = Path(__file__).resolve().parents[2] / 'migrations' / '001_multiformat.sql'
     statements = [part.strip() for part in '\n'.join(
         line for line in migration.read_text(encoding='utf-8').splitlines()
         if not line.lstrip().startswith('--')).split(';') if part.strip()]
-    user_table = 'Users' if 'Users' in tables else 'users'
-    has_role = 'Role' in {column['name'] for column in inspector.get_columns(user_table)}
+    has_role = 'Role' in {column['name'] for column in inspector.get_columns('users')}
     with engine.begin() as connection:
         for statement in statements:
-            if statement.startswith('ALTER TABLE Users') and has_role:
+            statement = user_table_sql(statement)
+            if statement.startswith('ALTER TABLE users') and has_role:
                 continue
             connection.execute(text(statement))
     inspector = inspect(engine)

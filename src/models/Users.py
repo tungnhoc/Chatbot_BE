@@ -5,7 +5,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 
 class User(Base):
-    __tablename__ = "Users"
+    __tablename__ = "users"
 
     UserID = Column(Integer, primary_key=True, autoincrement=True)
 
