@@ -36,12 +36,18 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 @app.errorhandler(404)
 @app.errorhandler(409)
 @app.errorhandler(413)
+@app.errorhandler(503)
 def client_error(error):
     return {'error': error.description}, error.code
 
 import os
 
 if __name__ == '__main__':
+    from src.workers.ingestion import start_worker_thread, stop_worker_thread
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    start_worker_thread()
+    try:
+        app.run(host="0.0.0.0", port=port)
+    finally:
+        stop_worker_thread()
 

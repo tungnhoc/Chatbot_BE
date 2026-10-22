@@ -46,6 +46,9 @@ def build_answer_prompt(user_query, retrieved_context, conversation_summary=None
 Use reference documents as evidence. Cite supported claims using provided source IDs such as [S1].
 Do not invent source IDs. If evidence is missing, clearly say the documents do not provide the answer.
 For document questions, do not substitute general knowledge for missing evidence.
+When asked to summarize, synthesize the supplied passages; the document does not need to contain a prewritten summary.
+If no reference passages are provided, explain that no document content is available and ask the user to select a successfully processed document.
+When describing your capabilities, describe document questions, summaries, comparisons and source citations. Do not advertise unrestricted expertise or claim to have read unavailable files.
 Conversation summary: {conversation_summary or ''}
 Recent messages: {messages_recently or ''}
 Reference documents (JSON): {retrieved_context or '[]'}

@@ -42,11 +42,22 @@ def enqueue_document(session, file, user_id, conversation_id, description=''):
         if not size:
             raise ValueError('Empty document')
         params = {'uid': user_id, 'hash': digest.hexdigest(), 'version': PIPELINE_VERSION}
-        existing = session.execute(text('''SELECT JobID,DocumentID,Status FROM IngestionJobs
-            WHERE UserID=:uid AND ContentHash=:hash AND PipelineVersion=:version'''), params).mappings().first()
+        existing = session.execute(text('''SELECT j.JobID,j.DocumentID,j.Status,d.FilePath
+            FROM IngestionJobs j JOIN Documents d ON d.DocumentID=j.DocumentID
+            WHERE j.UserID=:uid AND j.ContentHash=:hash AND j.PipelineVersion=:version'''), params).mappings().first()
         if existing:
-            path.unlink(missing_ok=True)
             job_id, doc_id, status = existing['JobID'], existing['DocumentID'], existing['Status']
+            if status != 'processing' and not Path(existing['FilePath'] or '').is_file():
+                # A restart on an ephemeral host can remove originals. Re-upload restores
+                # the source while preserving document/chunk IDs and vector deduplication.
+                session.execute(text('UPDATE Documents SET FilePath=:path WHERE DocumentID=:doc'),
+                                {'path': str(path), 'doc': doc_id})
+            else:
+                path.unlink(missing_ok=True)
+            if status == 'failed':
+                session.execute(text("""UPDATE IngestionJobs SET Status='queued',Attempts=0,Error=NULL,
+                    NextAttemptAt=CURRENT_TIMESTAMP WHERE JobID=:job AND Status='failed'"""), {'job': job_id})
+                status = 'queued'
         else:
             result = session.execute(text('''INSERT INTO Documents
                 (FileName,FilePath,FileType,UploadedBy,FileSizeMB,Description)

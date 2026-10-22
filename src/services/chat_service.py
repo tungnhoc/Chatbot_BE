@@ -223,7 +223,7 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
     import time
     import uuid
     from src.utils.pinecone_service import search_document_chunks
-    from werkzeug.exceptions import NotFound, Conflict
+    from werkzeug.exceptions import NotFound, Conflict, ServiceUnavailable
     started = time.perf_counter()
     if conversation_id:
         conv = session.execute(text('SELECT Title FROM Conversations WHERE ConversationID=:cid AND UserID=:uid'),
@@ -236,14 +236,16 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
     params = {'cid': conversation_id, 'uid': user_id}
     allowed = session.execute(text("""SELECT d.DocumentID,d.FileName,j.Status
         FROM ConversationDocuments cd JOIN Documents d ON d.DocumentID=cd.DocumentID
-        JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
+        LEFT JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
         WHERE cd.ConversationID=:cid AND cd.IsDeleted=0 AND d.UploadedBy=:uid"""), params).mappings().all()
     by_id = {r['DocumentID']: r for r in allowed}
     selected = list(dict.fromkeys(document_ids)) if document_ids is not None else list(by_id)
     if any(doc not in by_id for doc in selected):
         raise NotFound('Document not found in this conversation')
     if document_ids and any(by_id[doc]['Status'] != 'ready' for doc in selected):
-        raise Conflict('Selected documents are not ready')
+        raise Conflict('Tài liệu được chọn chưa xử lý thành công. Hãy kiểm tra trạng thái hoặc tải lại file trước khi hỏi.')
+    if document_ids == [] and by_id and any(doc['Status'] != 'ready' for doc in by_id.values()):
+        raise Conflict('Tài liệu trong cuộc trò chuyện chưa xử lý thành công. Chưa thể trả lời dựa trên tài liệu này.')
     selected = [doc for doc in selected if by_id[doc]['Status'] == 'ready']
     if document_ids is None and by_id and not selected:
         raise Conflict('No ready documents in this conversation')
@@ -282,6 +284,8 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
         source['id'] = 'S' + str(len(sources) + 1)
         sources.append(source)
         context.append({'source': source, 'text': chunk['text']})
+    if selected and not context:
+        raise ServiceUnavailable('Không lấy được nội dung tài liệu đã chọn. Vui lòng thử lại sau; hệ thống chưa thể đọc tài liệu này.')
     history = load_conversation_history(session, conversation_id, limit=6)
     recent = '\n'.join(f"{m['role']}: {m['text']}" for m in history)
     # Retrieval failures propagate as errors, rather than producing unsupported document answers.

@@ -135,7 +135,7 @@ class DatabaseTests(unittest.TestCase):
         statements = [
             'CREATE TABLE Conversations (ConversationID INTEGER PRIMARY KEY,UserID INTEGER,Title TEXT,CreatedAt DATETIME,UpdatedAt DATETIME)',
             'CREATE TABLE Documents (DocumentID INTEGER PRIMARY KEY,FileName TEXT,FilePath TEXT,FileType TEXT,UploadedBy INTEGER,FileSizeMB REAL,Description TEXT)',
-            "CREATE TABLE IngestionJobs (JobID TEXT PRIMARY KEY,DocumentID INTEGER UNIQUE,UserID INTEGER,ContentHash TEXT,PipelineVersion TEXT,Status TEXT DEFAULT 'queued', UNIQUE(UserID,ContentHash,PipelineVersion))",
+            "CREATE TABLE IngestionJobs (JobID TEXT PRIMARY KEY,DocumentID INTEGER UNIQUE,UserID INTEGER,ContentHash TEXT,PipelineVersion TEXT,Status TEXT DEFAULT 'queued',Attempts INTEGER DEFAULT 0,Error TEXT,NextAttemptAt DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(UserID,ContentHash,PipelineVersion))",
             'CREATE TABLE ConversationDocuments (ConversationID INTEGER,DocumentID INTEGER,IsDeleted INTEGER DEFAULT 0,FileURL TEXT,UploadedAt DATETIME,PRIMARY KEY(ConversationID,DocumentID))',
             'CREATE TABLE DocumentChunks (ChunkID INTEGER PRIMARY KEY,DocumentID INTEGER,ChunkText TEXT,Metadata TEXT)',
             'CREATE TABLE Messages (MessageID INTEGER PRIMARY KEY,ConversationID INTEGER,Role TEXT,Text TEXT,Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)',
@@ -168,6 +168,20 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.upload()
         self.assertEqual(list(Path(self.tmp.name).iterdir()), [])
+
+    def test_reupload_recovers_failed_document_after_original_was_lost(self):
+        original = self.upload()
+        source = self.session.execute(text('SELECT FilePath FROM Documents')).scalar_one()
+        Path(source).unlink()
+        self.session.execute(text("UPDATE IngestionJobs SET Status='failed',Attempts=3,Error='source_file_missing'"))
+        self.session.commit()
+        restored = self.upload()
+        self.assertEqual(restored['document_id'], original['document_id'])
+        self.assertEqual(restored['status'], 'queued')
+        source = self.session.execute(text('SELECT FilePath FROM Documents')).scalar_one()
+        self.assertEqual(Path(source).read_bytes(), b'Price: 125.5 USD.')
+        row = self.session.execute(text('SELECT Attempts,Error FROM IngestionJobs')).one()
+        self.assertEqual(tuple(row), (0, None))
 
     def test_worker_retry_stable_ids(self):
         from src.workers.ingestion import process_job
@@ -215,10 +229,41 @@ class DatabaseTests(unittest.TestCase):
     def test_explicit_empty_document_selection(self):
         from src.services.chat_service import handle_chat_query
         self.upload()
+        self.session.execute(text("UPDATE IngestionJobs SET Status='ready'"))
+        self.session.commit()
         with patch('src.services.chat_service.generate_answer', return_value='No document selected'), patch('src.utils.pinecone_service.search_document_chunks') as search:
             result = handle_chat_query(self.session, '1', 'Question', 1, [])
             self.assertEqual(result['sources'], [])
             search.assert_not_called()
+
+    def test_empty_ids_cannot_hide_unprocessed_attachment(self):
+        from src.services.chat_service import handle_chat_query
+        self.upload()
+        with patch('src.services.chat_service.generate_answer') as llm:
+            with self.assertRaises(Conflict):
+                handle_chat_query(self.session, '1', 'Summarize this document', 1, [])
+            llm.assert_not_called()
+
+    def test_missing_job_does_not_silently_become_general_chat(self):
+        from src.services.chat_service import handle_chat_query
+        result = self.upload()
+        self.session.execute(text('DELETE FROM IngestionJobs'))
+        self.session.commit()
+        with patch('src.services.chat_service.generate_answer') as llm:
+            with self.assertRaises(Conflict):
+                handle_chat_query(self.session, '1', 'Summarize this document', 1, [result['document_id']])
+            llm.assert_not_called()
+
+    def test_ready_document_without_retrieved_content_does_not_call_llm(self):
+        from src.services.chat_service import handle_chat_query
+        from werkzeug.exceptions import ServiceUnavailable
+        result = self.upload()
+        self.session.execute(text("UPDATE IngestionJobs SET Status='ready'"))
+        self.session.commit()
+        with patch('src.utils.pinecone_service.search_document_chunks', return_value=[]), patch('src.services.chat_service.generate_answer') as llm:
+            with self.assertRaises(ServiceUnavailable):
+                handle_chat_query(self.session, '1', 'Summarize this document', 1, [result['document_id']])
+            llm.assert_not_called()
 
     def test_llm_failure_not_saved_as_success(self):
         from src.services.chat_service import handle_chat_query

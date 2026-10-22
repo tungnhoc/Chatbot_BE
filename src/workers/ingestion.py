@@ -2,6 +2,9 @@
 import json
 import logging
 import time
+import os
+from threading import Event, Lock, Thread
+import requests
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from src.config.db_session import engine
@@ -10,6 +13,25 @@ from src.ingestion.chunker import chunk_blocks
 from src.utils.pinecone_service import upsert_chunks
 
 log = logging.getLogger(__name__)
+_thread_lock = Lock()
+_thread = None
+_stop = None
+
+
+def processing_failure(error):
+    """Persist useful diagnostics without provider responses or filesystem paths."""
+    if isinstance(error, FileNotFoundError):
+        return 'source_file_missing: Upload the document again; its stored original is unavailable.', True
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        status = error.response.status_code
+        if status == 402:
+            return 'embedding_credits: Embedding provider has no available credits.', True
+        if status in (401, 403):
+            return 'embedding_credentials: Embedding service configuration requires attention.', True
+        return f'embedding_http_{status}: Embedding service request failed.', status < 500 and status != 429
+    if isinstance(error, ImportError):
+        return 'missing_dependency: Document processing dependencies are not installed.', True
+    return 'Processing failed: ' + type(error).__name__, isinstance(error, ValueError)
 
 
 def process_job(session, job):
@@ -58,12 +80,12 @@ def run_once():
                     except Exception as exc:
                         session.rollback()
                         log.exception('Ingestion failed for job %s', job_id)
-                        permanent = isinstance(exc, (ValueError, FileNotFoundError, ImportError))
+                        message, permanent = processing_failure(exc)
                         status = 'failed' if permanent or job['Attempts'] + 1 >= 3 else 'queued'
                         session.execute(text('''UPDATE IngestionJobs SET Status=:status,Error=:error,
                             NextAttemptAt=DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 SECOND),
                             UpdatedAt=CURRENT_TIMESTAMP WHERE JobID=:id'''),
-                            {'status': status, 'error': 'Processing failed: ' + type(exc).__name__, 'id': job_id})
+                            {'status': status, 'error': message, 'id': job_id})
                         session.commit()
                     return True
                 finally:
@@ -73,12 +95,42 @@ def run_once():
     return False
 
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    while True:
+def run_forever(stop=None):
+    stop = stop if stop is not None else Event()
+    while not stop.is_set():
         try:
             if not run_once():
-                time.sleep(2)
+                stop.wait(2)
         except Exception:
             log.exception('Worker iteration failed')
-            time.sleep(5)
+            stop.wait(5)
+
+
+def start_worker_thread():
+    """Opt out with INGESTION_WORKER_MODE=external when using a separate worker."""
+    global _thread, _stop
+    mode = os.getenv('INGESTION_WORKER_MODE', 'embedded')
+    if mode == 'external':
+        return None
+    if mode != 'embedded':
+        raise ValueError('INGESTION_WORKER_MODE must be embedded or external')
+    with _thread_lock:
+        if _thread is None or not _thread.is_alive():
+            _stop = Event()
+            _thread = Thread(target=run_forever, args=(_stop,), name='document-ingestion', daemon=True)
+            _thread.start()
+            log.info('Embedded document ingestion worker started')
+    return _thread
+
+
+def stop_worker_thread():
+    with _thread_lock:
+        if _stop is not None:
+            _stop.set()
+        if _thread is not None:
+            _thread.join(timeout=3)
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    run_forever()
