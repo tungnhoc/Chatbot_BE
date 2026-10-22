@@ -1,4 +1,5 @@
 import io
+import os
 import json
 import tempfile
 import unittest
@@ -169,6 +170,30 @@ class DatabaseTests(unittest.TestCase):
                 self.upload()
         self.assertEqual(list(Path(self.tmp.name).iterdir()), [])
 
+    def test_switch_to_gemini_creates_new_ingestion_job(self):
+        with patch.dict(os.environ, {'EMBEDDING_BACKEND': 'huggingface'}):
+            original = self.upload()
+        with patch.dict(os.environ, {'EMBEDDING_BACKEND': 'gemini',
+                'GEMINI_EMBEDDING_MODEL': 'gemini-embedding-2',
+                'GEMINI_EMBEDDING_DIMENSION': '768', 'PINECONE_NAMESPACE': 'gemini-test'}):
+            replacement = self.upload()
+        self.assertNotEqual(original['document_id'], replacement['document_id'])
+        self.assertEqual(self.session.execute(text('SELECT COUNT(*) FROM IngestionJobs')).scalar(), 2)
+
+    def test_gemini_rejects_ready_documents_from_old_embedding_profile(self):
+        from src.services.chat_service import handle_chat_query
+        with patch.dict(os.environ, {'EMBEDDING_BACKEND': 'huggingface'}):
+            original = self.upload()
+        self.session.execute(text("UPDATE IngestionJobs SET Status='ready'"))
+        self.session.commit()
+        with patch.dict(os.environ, {'EMBEDDING_BACKEND': 'gemini',
+                'GEMINI_EMBEDDING_MODEL': 'gemini-embedding-2',
+                'GEMINI_EMBEDDING_DIMENSION': '768', 'PINECONE_NAMESPACE': 'gemini-test'}), \
+                patch('src.services.chat_service.generate_answer') as llm:
+            with self.assertRaises(Conflict):
+                handle_chat_query(self.session, '1', 'Question', 1, [original['document_id']])
+            llm.assert_not_called()
+
     def test_reupload_recovers_failed_document_after_original_was_lost(self):
         original = self.upload()
         source = self.session.execute(text('SELECT FilePath FROM Documents')).scalar_one()
@@ -186,7 +211,9 @@ class DatabaseTests(unittest.TestCase):
     def test_worker_retry_stable_ids(self):
         from src.workers.ingestion import process_job
         result = self.upload()
-        job = {'DocumentID': result['document_id'], 'UserID': 1}
+        job = dict(self.session.execute(text(
+            'SELECT * FROM IngestionJobs WHERE DocumentID=:doc'),
+            {'doc': result['document_id']}).mappings().one())
         with patch('src.workers.ingestion.upsert_chunks', side_effect=RuntimeError('temporary')):
             with self.assertRaises(RuntimeError):
                 process_job(self.session, job)

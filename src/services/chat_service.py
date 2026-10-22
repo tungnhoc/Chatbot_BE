@@ -234,7 +234,7 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
     else:
         conversation_id = create_new_conversation(session, user_id, title)
     params = {'cid': conversation_id, 'uid': user_id}
-    allowed = session.execute(text("""SELECT d.DocumentID,d.FileName,j.Status
+    allowed = session.execute(text("""SELECT d.DocumentID,d.FileName,j.Status,j.PipelineVersion
         FROM ConversationDocuments cd JOIN Documents d ON d.DocumentID=cd.DocumentID
         LEFT JOIN IngestionJobs j ON j.DocumentID=d.DocumentID
         WHERE cd.ConversationID=:cid AND cd.IsDeleted=0 AND d.UploadedBy=:uid"""), params).mappings().all()
@@ -246,6 +246,11 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
         raise Conflict('Tài liệu được chọn chưa xử lý thành công. Hãy kiểm tra trạng thái hoặc tải lại file trước khi hỏi.')
     if document_ids == [] and by_id and any(doc['Status'] != 'ready' for doc in by_id.values()):
         raise Conflict('Tài liệu trong cuộc trò chuyện chưa xử lý thành công. Chưa thể trả lời dựa trên tài liệu này.')
+    if os.getenv('EMBEDDING_BACKEND') == 'gemini':
+        from src.ingestion.profile import ingestion_profile
+        profile = ingestion_profile()
+        if any(by_id[doc]['PipelineVersion'] != profile for doc in selected):
+            raise Conflict('Embedding đã thay đổi. Hãy tạo hội thoại mới và tải lại tài liệu để xử lý bằng cấu hình mới.')
     selected = [doc for doc in selected if by_id[doc]['Status'] == 'ready']
     if document_ids is None and by_id and not selected:
         raise Conflict('No ready documents in this conversation')

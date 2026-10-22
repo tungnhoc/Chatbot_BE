@@ -35,6 +35,10 @@ def processing_failure(error):
 
 
 def process_job(session, job):
+    if os.getenv('EMBEDDING_BACKEND') == 'gemini':
+        from src.ingestion.profile import ingestion_profile
+        if job['PipelineVersion'] != ingestion_profile():
+            raise ValueError('Embedding configuration changed; re-upload the original to create a new job')
     doc = session.execute(text('SELECT FileName,FilePath FROM Documents WHERE DocumentID=:doc'),
                           {'doc': job['DocumentID']}).mappings().one()
     chunks = session.execute(text('SELECT ChunkID,ChunkText FROM DocumentChunks WHERE DocumentID=:doc ORDER BY ChunkID'),

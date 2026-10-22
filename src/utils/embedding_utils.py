@@ -9,8 +9,14 @@ MODEL_ID = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
 API_URL = f'https://router.huggingface.co/hf-inference/models/{MODEL_ID}/pipeline/feature-extraction'
 
 
-def get_embeddings(texts):
+def get_embeddings(texts, task_type='RETRIEVAL_DOCUMENT'):
     texts = [texts] if isinstance(texts, str) else texts
+    backend = os.getenv('EMBEDDING_BACKEND', 'huggingface')
+    if backend == 'gemini':
+        from src.utils.gemini_embeddings import encode
+        return encode(texts, task_type)
+    if backend not in {'huggingface', 'local-onnx'}:
+        raise ValueError('EMBEDDING_BACKEND must be huggingface, local-onnx or gemini')
     if not texts:
         return np.empty((0, 384), dtype=np.float32)
     if os.getenv('EMBEDDING_BACKEND', 'huggingface') == 'local-onnx':

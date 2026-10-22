@@ -7,13 +7,24 @@ import os
 
 def _namespace():
     value = os.getenv('PINECONE_NAMESPACE', '')
-    if os.getenv('EMBEDDING_BACKEND') == 'local-onnx' and not value:
-        raise ValueError('Use a separate PINECONE_NAMESPACE for local embeddings and re-ingest documents')
+    if os.getenv('EMBEDDING_BACKEND') in {'local-onnx', 'gemini'} and not value:
+        raise ValueError('Use a separate PINECONE_NAMESPACE for the new embedding backend and re-ingest documents')
     return {'namespace': value} if value else {}
+
+
+def _validate_index(index):
+    if os.getenv('EMBEDDING_BACKEND') == 'gemini':
+        from src.utils.gemini_embeddings import settings
+        _, dimension = settings()
+        actual = index.describe_index_stats()['dimension']
+        if actual != dimension:
+            raise ValueError(f'Pinecone dimension {actual} differs from Gemini dimension {dimension}; configure a new index')
 
 
 def upsert_chunks(chunk_ids: List[str], texts: List[str], user_id:str, document_id: int):
     index = get_pipecone_chunk_index()
+    _namespace()
+    _validate_index(index)
     if len(chunk_ids) != len(texts):
         raise ValueError('Chunk/text count mismatch')
     for start in range(0, len(texts), 32):
@@ -30,8 +41,11 @@ def upsert_chunks(chunk_ids: List[str], texts: List[str], user_id:str, document_
 def search_document_chunks(query, user_id, document_ids, top_k=8):
     if not document_ids:
         return []
-    response = get_pipecone_chunk_index().query(
-        vector=get_embeddings(query)[0].tolist(), top_k=top_k, include_metadata=True,
+    index = get_pipecone_chunk_index()
+    _namespace()
+    _validate_index(index)
+    response = index.query(
+        vector=get_embeddings(query, task_type='RETRIEVAL_QUERY')[0].tolist(), top_k=top_k, include_metadata=True,
         filter={'user_id': {'$eq': str(user_id)}, 'document_id': {'$in': document_ids}}, **_namespace())
     return [{'chunk_id': int(m['metadata']['chunk_id']), 'score': float(m['score'])}
             for m in response['matches']]
@@ -40,7 +54,9 @@ def search_document_chunks(query, user_id, document_ids, top_k=8):
 
 def search_chunks(query: str, user_id: str, document_id:int, top_k: int=3):
     index = get_pipecone_chunk_index()
-    query_emb = get_embeddings(query)[0].tolist()
+    _namespace()
+    _validate_index(index)
+    query_emb = get_embeddings(query, task_type='RETRIEVAL_QUERY')[0].tolist()
     filter_body = {
         "user_id": user_id,
         "document_id": document_id
@@ -50,7 +66,7 @@ def search_chunks(query: str, user_id: str, document_id:int, top_k: int=3):
         vector=query_emb,
         top_k=top_k,
         include_metadata=True,
-        filter=filter_body
+        filter=filter_body, **_namespace()
     )
     chunk_ids = [match["metadata"]["chunk_id"] for match in response["matches"]]
     print(f"len {len(chunk_ids)} {chunk_ids}")
@@ -59,6 +75,8 @@ def search_chunks(query: str, user_id: str, document_id:int, top_k: int=3):
 
 def upsert_summary(summary_text:str, summary_id: str,user_id: str,conv_id: int):
     index = get_pipecone_summary_index()
+    _namespace()
+    _validate_index(index)
     embedding = get_embeddings(summary_text)[0]
     vector = {
         "id": f"summary_{user_id}_{conv_id}_{summary_id}",
@@ -69,13 +87,15 @@ def upsert_summary(summary_text:str, summary_id: str,user_id: str,conv_id: int):
             "conv_id": conv_id,
         }
     }
-    index.upsert([vector])
+    index.upsert([vector], **_namespace())
     print("Thành công upsert summary lên Pipecone")
 
 def search_summary(query: str, user_id: str, conv_id:int, top_k: int=3):
     index = get_pipecone_summary_index()
+    _namespace()
+    _validate_index(index)
 
-    query_emb = get_embeddings(query)[0].tolist()
+    query_emb = get_embeddings(query, task_type='RETRIEVAL_QUERY')[0].tolist()
 
     filter_body = {
         "user_id": user_id,
@@ -86,7 +106,7 @@ def search_summary(query: str, user_id: str, conv_id:int, top_k: int=3):
         vector=query_emb,
         top_k=top_k,
         include_metadata=True,
-        filter=filter_body
+        filter=filter_body, **_namespace()
     )
     matches = response.get("matches", [])
     if not matches: 

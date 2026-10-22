@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from src.ingestion.readers import SUPPORTED
-from src.ingestion.chunker import PIPELINE_VERSION
+from src.ingestion.profile import ingestion_profile
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 
@@ -41,7 +41,7 @@ def enqueue_document(session, file, user_id, conversation_id, description=''):
                 target.write(block)
         if not size:
             raise ValueError('Empty document')
-        params = {'uid': user_id, 'hash': digest.hexdigest(), 'version': PIPELINE_VERSION}
+        params = {'uid': user_id, 'hash': digest.hexdigest(), 'version': ingestion_profile()}
         existing = session.execute(text('''SELECT j.JobID,j.DocumentID,j.Status,d.FilePath
             FROM IngestionJobs j JOIN Documents d ON d.DocumentID=j.DocumentID
             WHERE j.UserID=:uid AND j.ContentHash=:hash AND j.PipelineVersion=:version'''), params).mappings().first()
