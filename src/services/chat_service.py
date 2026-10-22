@@ -299,7 +299,7 @@ def handle_chat_query(session, user_id: str, query_text: str, conversation_id: i
     payload = {'query': query_text, 'answer': answer, 'retrieved': retrieved, 'context': context,
                'sources': sources, 'latency_ms': round((time.perf_counter()-started)*1000, 2),
                'model': (os.getenv('GROQ_MODEL') or 'openai/gpt-oss-20b'),
-               'pipeline_version': 'multiformat-v1', 'prompt_version': 'grounded-v1'}
+               'pipeline_version': 'multiformat-v1', 'prompt_version': 'grounded-v2-readability'}
     from src.llm.llm_client import get_last_usage
     payload['usage'] = get_last_usage()
     payload['embedding_backend'] = os.getenv('EMBEDDING_BACKEND', 'huggingface')
